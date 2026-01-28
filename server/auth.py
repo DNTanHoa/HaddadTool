@@ -23,7 +23,10 @@ def verify_user(username: str, password: str) -> bool:
     hashed = users.get(username)
     if not hashed:
         return False
-    return bcrypt.verify(password, hashed)
+    try:
+        return bcrypt.verify(password, hashed)
+    except (ValueError, TypeError):
+        return False
 
 def create_access_token(username: str) -> str:
     now = datetime.now(timezone.utc)
