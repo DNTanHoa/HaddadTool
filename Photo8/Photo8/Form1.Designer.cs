@@ -25,6 +25,7 @@ namespace Photo8
 
         private void InitializeComponent()
         {
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Form1));
             this.btnLogin = new System.Windows.Forms.Button();
             this.btnLoadTasks = new System.Windows.Forms.Button();
             this.lblStatus = new System.Windows.Forms.Label();
@@ -351,6 +352,7 @@ namespace Photo8
             this.ClientSize = new System.Drawing.Size(615, 513);
             this.Controls.Add(this.tablePanel1);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
+            this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
             this.Name = "Form1";
             this.Text = "Web Automation - Selenium Chrome";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Form1_FormClosing);
