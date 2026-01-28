@@ -56,6 +56,11 @@ def health():
 
 @app.post("/api/v1/auth/login", response_model=LoginResponse)
 def login(req: LoginRequest):
+    # DEBUG (remove later)
+    pw = req.password if req.password is not None else ""
+    print("DEBUG login username=", req.username)
+    print("DEBUG password chars=", len(pw), "bytes=", len(pw.encode("utf-8")))
+
     if not verify_user(req.username, req.password):
         raise HTTPException(status_code=401, detail="Invalid username/password")
     token = create_access_token(req.username)

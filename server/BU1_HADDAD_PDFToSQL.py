@@ -464,8 +464,8 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
             })
 
     # ---------------------------------------------------------
-    # NORMAL RULE: other columns keep old behavior
-    # (LABELS group always comes here because has_zipper_triplet=False)
+    # NORMAL RULE (UPDATED): apply GARMENT (c0) for ALL TRIM + LABELS
+    # COLOR = "garment | trim"
     # ---------------------------------------------------------
     for col, position in position_cols:
         if col in skip_cols:
@@ -486,17 +486,30 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
 
         for i in range(color_idx + 1, len(df_table)):
             row_i = df_table.iloc[i]
-            cell = read_color_under_position(row_i, col, cols, join_width=2)
-            if not is_color_value(cell):
+
+            # ✅ GARMENT COLOR always from c0
+            color_garment = norm(row_i.get("c0", ""))
+            if not is_color_value(color_garment):
                 continue
+
+            # ✅ TRIM/LABEL color under current position column
+            trim_cell = read_color_under_position(row_i, col, cols, join_width=2)
+            trim_cell = norm(trim_cell)
+
+            # nếu trim cell rỗng thì skip (tuỳ bạn)
+            if not is_color_value(trim_cell):
+                continue
+
+            # ✅ Combined COLOR: garment | trim
+            color_combined = SEP.join([x for x in [color_garment, trim_cell] if x])
 
             out.append({
                 "SUPPLIER": "",
                 "STYLE_NO": meta.get("style_number", ""),
                 "description": desc,
                 "ITEM DESCRIPTION": item_desc,
-                "COLOR": cell,
-                "color TRIM": cell,
+                "COLOR": color_combined,      # ✅ garment | trim
+                "color TRIM": trim_cell,      # ✅ trim only
                 "DEL": "",
                 "date approved": "",
                 "Status2": "",
@@ -504,7 +517,6 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
                 "matched_groups": meta.get("matched_groups", ""),
                 "top_right_text": meta.get("top_right_text", ""),
             })
-
     return out
 
 

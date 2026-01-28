@@ -14,6 +14,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 
+from pathlib import Path
+import os
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -31,8 +34,20 @@ SPREADSHEET_ID = "1HVERYwjbyLroIpJY28-p9RNKz4Q6SyZEYamiP0rLhcY"
 FABRIC_SHEET_NAME = "Fabric"
 TRIM_SHEET_NAME = "TrimAndLabels"
 
-GSERVICE_ACCOUNT_JSON = r"E:\temp\Projects\PDFToSQL\Account_LS_EHD_MANAGEMENT.json"
-SQL_CONFIG_PATH = r"C:\ServerPassword.json"
+BASE_DIR = Path(__file__).resolve().parent
+
+
+# Put these JSON files next to this script for portability
+GSERVICE_ACCOUNT_JSON = os.environ.get(
+    "HADDAD_GS_SERVICE_JSON",
+    str(BASE_DIR / "Account_LS_EHD_MANAGEMENT.json")
+    )
+
+
+SQL_CONFIG_PATH = os.environ.get(
+    "HADDAD_SQL_CONFIG",
+    str(BASE_DIR / "ServerPassword.json")
+    )
 
 # Sheet layout
 META_ROW = 1      # Row 1: last load time
@@ -73,8 +88,9 @@ def read_sql_table(engine: Engine, full_table: str) -> pd.DataFrame:
 # =========================================================
 def delete_rows_by_file_names(ws: gspread.Worksheet, file_names: List[str], file_col_name: str = "file_name") -> int:
     """
-    Delete all data rows (row>=3) where file_name in file_names.
-    Return number of deleted rows.
+    Instead of deleting rows (can fail when deleting all non-frozen rows),
+    we CLEAR the row contents for matching file_name.
+    Return number of cleared rows.
     """
     if not file_names:
         return 0
@@ -85,36 +101,26 @@ def delete_rows_by_file_names(ws: gspread.Worksheet, file_names: List[str], file
 
     idx = header.index(file_col_name) + 1  # 1-based col
     col_values = ws.col_values(idx)  # includes row1..N
-    # Build list of row numbers to delete (actual sheet rows)
-    to_delete = []
+
+    to_clear = []
     for r, v in enumerate(col_values, start=1):
         if r < DATA_START_ROW:
             continue
         fn = (v or "").strip()
         if fn and fn in file_names:
-            to_delete.append(r)
+            to_clear.append(r)
 
-    if not to_delete:
+    if not to_clear:
         return 0
 
-    # group contiguous ranges and delete from bottom -> top
-    to_delete.sort()
-    ranges = []
-    start = prev = to_delete[0]
-    for x in to_delete[1:]:
-        if x == prev + 1:
-            prev = x
-        else:
-            ranges.append((start, prev))
-            start = prev = x
-    ranges.append((start, prev))
+    # Clear full row range A..last_col for each row
+    last_col = len(header)
+    cleared = 0
+    for r in to_clear:
+        ws.batch_clear([f"A{r}:{chr(64+last_col)}{r}"])
+        cleared += 1
 
-    deleted = 0
-    for s, e in reversed(ranges):
-        ws.delete_rows(s, e)
-        deleted += (e - s + 1)
-
-    return deleted
+    return cleared
 
 def sync_sql_to_google_sheet_replace_files(
     engine: Engine,
