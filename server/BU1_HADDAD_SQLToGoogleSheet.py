@@ -14,8 +14,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 
-from pathlib import Path
 import os
+from pathlib import Path
+from gspread.utils import rowcol_to_a1
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -86,41 +87,69 @@ def read_sql_table(engine: Engine, full_table: str) -> pd.DataFrame:
 # =========================================================
 # GOOGLE SHEETS HELPERS
 # =========================================================
-def delete_rows_by_file_names(ws: gspread.Worksheet, file_names: List[str], file_col_name: str = "file_name") -> int:
-    """
-    Instead of deleting rows (can fail when deleting all non-frozen rows),
-    we CLEAR the row contents for matching file_name.
-    Return number of cleared rows.
-    """
-    if not file_names:
-        return 0
-
+def find_row_blocks_by_file(ws, file_names, file_col_name="file_name"):
+    file_set = {str(x).strip() for x in file_names if x}
     header = get_header(ws)
     if not header or file_col_name not in header:
-        return 0
+        return []
 
-    idx = header.index(file_col_name) + 1  # 1-based col
-    col_values = ws.col_values(idx)  # includes row1..N
+    file_col_idx = header.index(file_col_name) + 1
+    col_values = ws.col_values(file_col_idx)
 
-    to_clear = []
+    rows = []
     for r, v in enumerate(col_values, start=1):
         if r < DATA_START_ROW:
             continue
         fn = (v or "").strip()
-        if fn and fn in file_names:
-            to_clear.append(r)
+        if fn in file_set:
+            rows.append(r)
 
-    if not to_clear:
+    if not rows:
+        return []
+
+    rows.sort()
+
+    blocks = []
+    s = e = rows[0]
+    for rr in rows[1:]:
+        if rr == e + 1:
+            e = rr
+        else:
+            blocks.append((s, e))
+            s = e = rr
+    blocks.append((s, e))
+    return blocks
+
+def delete_rows_blocks(ws: gspread.Worksheet, blocks):
+    """Delete rows by blocks using Sheets API batchUpdate. Delete bottom-up."""
+    if not blocks:
         return 0
 
-    # Clear full row range A..last_col for each row
-    last_col = len(header)
-    cleared = 0
-    for r in to_clear:
-        ws.batch_clear([f"A{r}:{chr(64+last_col)}{r}"])
-        cleared += 1
+    # sheetId is required for deleteDimension
+    sheet_id = ws.id
+    reqs = []
 
-    return cleared
+    # delete bottom-up to keep indices stable
+    for s, e in sorted(blocks, key=lambda x: x[0], reverse=True):
+        # Google API uses 0-based, endIndex is exclusive
+        reqs.append({
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": s - 1,
+                    "endIndex": e
+                }
+            }
+        })
+
+    ws.spreadsheet.batch_update({"requests": reqs})
+    # number of deleted rows
+    return sum(e - s + 1 for s, e in blocks)
+
+def delete_rows_by_file_names_delete(ws, file_names, file_col_name="file_name"):
+    blocks = find_row_blocks_by_file(ws, file_names, file_col_name)
+    return delete_rows_blocks(ws, blocks)
 
 def sync_sql_to_google_sheet_replace_files(
     engine: Engine,
@@ -164,8 +193,8 @@ def sync_sql_to_google_sheet_replace_files(
     write_header_if_needed(ws_trim, trim_cols)
 
     # 5) DELETE rows in sheets for these file_names
-    del_f = delete_rows_by_file_names(ws_fabric, file_names_to_replace, file_col_name=file_col)
-    del_t = delete_rows_by_file_names(ws_trim, file_names_to_replace, file_col_name=file_col)
+    del_f = delete_rows_by_file_names_delete(ws_fabric, file_names_to_replace, file_col_name=file_col)
+    del_t = delete_rows_by_file_names_delete(ws_trim, file_names_to_replace, file_col_name=file_col)
     print(f"Deleted rows: Fabric={del_f}, Trim={del_t}")
 
     # 6) Filter SQL rows for these file_names, then append back
