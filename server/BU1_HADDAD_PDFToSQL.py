@@ -6,7 +6,6 @@ import json
 import urllib.parse
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
-
 import pandas as pd
 import pdfplumber
 from sqlalchemy import create_engine, text
@@ -890,7 +889,8 @@ if __name__ == "__main__":
     ap.add_argument("--recursive", action="store_true")
     args = ap.parse_args()
 
-    CONFIG_PATH = r"C:\ServerPassword.json"
+    BASE_DIR = Path(__file__).resolve().parent
+    CONFIG_PATH = BASE_DIR / "ServerPassword.json"
 
     server, database, user, password = read_config(CONFIG_PATH)
     engine = create_engine_sqlserver(server, database, user, password)
