@@ -1,27 +1,28 @@
-﻿using OpenQA.Selenium;
+﻿using DevExpress.Data.NetCompatibility.Extensions;
+using DevExpress.XtraEditors.Filtering;
+using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
-using System;
-using System.Windows.Forms;
 using SeleniumExtras.WaitHelpers;
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Drawing;
-using System.Data.SqlClient;
-using System.Data;
-using System.Configuration;
-using System.IO;
 using System.ComponentModel;
-using DevExpress.Data.NetCompatibility.Extensions;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics.Contracts;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Security.Policy;
 using System.Text.RegularExpressions;
-using System.Diagnostics.Contracts;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement.ListView;
-using System.Threading.Tasks;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using System.Threading;
-using DevExpress.XtraEditors.Filtering;
-using System.Reflection.Emit;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.ListView;
 //using static DevExpress.Data.Filtering.Helpers.SubExprHelper.ThreadHoppingFiltering;
 
 namespace Photo8
@@ -121,6 +122,7 @@ namespace Photo8
 
         private void btnLoadTasks_Click(object sender, EventArgs e)
         {
+            var MissingPO = "";
             try
             {
                 // Kiểm tra đã login
@@ -313,22 +315,31 @@ namespace Photo8
 
 
                 // === AUTOMATION TASK ===
-                FillCreateRequest(dt);
-
+                var Missing = FillCreateRequest(dt);
+                MissingPO = Missing;
                 CheckProcess = 2;
                 lblStatus.Text = "Status: Waiting...";
                 MessageBox.Show("Tasks Done!");
             }
             catch (Exception ex)
             {
-                CheckProcess = 0;
-                MessageBox.Show(ex.Message);
-                driver.Quit();
-                driver = null;
+                if (MissingPO != "")
+                {
+                    CheckProcess = 0;
+                    MessageBox.Show("Missing PO to fill: ", MissingPO);
+                }
+                else
+                {
+                    CheckProcess = 0;
+                    MessageBox.Show(ex.Message);
+                }
+                    
+                //driver.Quit();
+                //driver = null;
             }
         }
 
-        private void FillCreateRequest(DataTable dt)
+        private string FillCreateRequest(DataTable dt)
         {
             // Season
             WebDriverWait wait = new WebDriverWait(driver, TimeSpan.FromSeconds(100));
@@ -547,6 +558,7 @@ namespace Photo8
                  .Distinct()
                  .ToList();
             wait.Until(d => d.FindElements(By.CssSelector(".checkbox-list input[type='checkbox']")).Count > 0);
+            var MissingPO = "";
 
             foreach (var po in poList)
             {
@@ -560,11 +572,12 @@ namespace Photo8
                             .ExecuteScript("arguments[0].click();", checkbox);
                     }
                 }
-                finally
+                catch (Exception ex)
                 {
-                    
+                    MissingPO = MissingPO + po + ", ";
                 }
             }
+            return MissingPO;
         }
         
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
