@@ -325,7 +325,7 @@ namespace Photo8
             {
                 if (MissingPO != "")
                 {
-                    CheckProcess = 0;
+                    CheckProcess = 2;
                     MessageBox.Show("Missing PO to fill: ", MissingPO);
                 }
                 else
