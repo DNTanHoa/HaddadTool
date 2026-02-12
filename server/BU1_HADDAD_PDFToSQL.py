@@ -371,99 +371,19 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
         return []
 
     # ---------------------------------------------------------
-    # Helper: detect zipper teeth/tape/pull columns
+    # NOTE (UPDATED): Zipper merge is handled ONLY in post_process_trimlabels_before_sql().
+    # Here we always output RAW rows per position column (including ZIPPER TEETH/TAPE/PULL),
+    # and we keep POSITION in a dedicated column for reliable post-processing.
     # ---------------------------------------------------------
-    def _pos_norm(p: str) -> str:
-        return re.sub(r"\s+", " ", norm(p).lower())
-
-    teeth_col = None
-    tape_col = None
-    pull_cols: list[str] = []
-
-    for c, p in position_cols:
-        pn = _pos_norm(p)
-        if re.search(r"\bzipper\s*teeth\b", pn) and teeth_col is None:
-            teeth_col = c
-        elif re.search(r"\bzipper\s*tape\b", pn) and tape_col is None:
-            tape_col = c
-        elif re.search(r"\bzipper\s*pull\b", pn):
-            pull_cols.append(c)
-
-    is_trim_group = "TRIM" in str(meta.get("matched_groups", "")).upper()
-    has_zipper_triplet = bool(is_trim_group and teeth_col and tape_col and len(pull_cols) > 0)
 
     out: list[dict] = []
 
-    # ---------------------------------------------------------
-    # SPECIAL RULE (TRIM only): zipper teeth + tape + pull
-    # -> 1 row only (per COLORWAYS line)
-    # ---------------------------------------------------------
-    skip_cols = set()
-    if has_zipper_triplet:
-        skip_cols.update([teeth_col, tape_col, *pull_cols])
-
-        def _build_desc_for_col(col: str, position: str) -> str:
-            dev_or_vendor = pick_dev_or_vendor(label_to_row, col)
-            internal_code = pick_value(label_to_row, "INTERNAL CODE", col)
-            name = pick_first_value(label_to_row, ["NAME", "ITEM NAME", "TRIM NAME", "DESCRIPTION"], col)
-
-
-            parts = [internal_code, position, dev_or_vendor, name]
-            parts = [p for p in parts if p]
-            return " - ".join(parts)
-
-        teeth_pos = next((p for c, p in position_cols if c == teeth_col), "zipper teeth")
-        tape_pos = next((p for c, p in position_cols if c == tape_col), "zipper tape")
-        pull_positions = [next((p for c, p in position_cols if c == pc), "zipper pull") for pc in pull_cols]
-
-        desc_teeth = _build_desc_for_col(teeth_col, teeth_pos)
-        desc_tape = _build_desc_for_col(tape_col, tape_pos)
-        desc_pulls = [_build_desc_for_col(pc, ppos) for pc, ppos in zip(pull_cols, pull_positions)]
-
-        # ✅ store combined description using SEP
-        merged_description = SEP.join([d for d in [desc_teeth, desc_tape, *desc_pulls] if d])
-
-        # ITEM DESCRIPTION: lấy theo teeth
-        item_desc_teeth = pick_first_value(
-            label_to_row,
-            ["LOCATION/PLACEMENT", "LOCATION / PLACEMENT", "LOCATION", "PLACEMENT"],
-            teeth_col
-        )
-        if not item_desc_teeth:
-            item_desc_teeth = teeth_pos
-
-        # COLORWAYS rows:
-        # - garment color = c0
-        # - trim tape/pull = by their columns (do NOT use teeth col)
-        for i in range(color_idx + 1, len(df_table)):
-            row_i = df_table.iloc[i]
-
-            color_garment = norm(row_i.get("c0", ""))
-            if not is_color_value(color_garment):
-                continue
-
-            tape_trim = read_color_under_position(row_i, tape_col, cols, join_width=2)
-            pull_trims = [read_color_under_position(row_i, pc, cols, join_width=2) for pc in pull_cols]
-            
-            color_combined = SEP.join([x for x in [color_garment, norm(tape_trim), *[norm(x) for x in pull_trims]] if norm(x)])
-
-            out.append({
-                "SUPPLIER": "",
-                "STYLE_NO": meta.get("style_number", ""),
-                "description": merged_description,
-                "ITEM DESCRIPTION": item_desc_teeth,   # theo teeth
-                "COLOR": color_combined,               # garment | tape | pull
-                "color TRIM": norm(tape_trim),         # Color Trim lấy theo tape
-                "DEL": "",
-                "date approved": "",
-                "Status2": "",
-                "page": meta.get("page"),
-                "matched_groups": meta.get("matched_groups", ""),
-                "top_right_text": meta.get("top_right_text", ""),
-            })
+    skip_cols: set[str] = set()
 
     # ---------------------------------------------------------
     # NORMAL RULE (UPDATED): apply GARMENT (c0) for ALL TRIM + LABELS
+    # COLOR = "garment | trim"
+    # ---------------------------------------------------------
     # COLOR = "garment | trim"
     # ---------------------------------------------------------
     for col, position in position_cols:
@@ -481,7 +401,8 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
         if not item_desc:
             item_desc = position
 
-        desc = join_trim_description(internal_code, position, name)
+        vendor_ref = pick_value(label_to_row, "VENDOR REF NO", col)
+        desc = join_trim_description(internal_code, position, " ".join([p for p in [vendor_ref, name] if p]))
 
         for i in range(color_idx + 1, len(df_table)):
             row_i = df_table.iloc[i]
@@ -505,6 +426,7 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
             out.append({
                 "SUPPLIER": "",
                 "STYLE_NO": meta.get("style_number", ""),
+                "POSITION": position,
                 "description": desc,
                 "ITEM DESCRIPTION": item_desc,
                 "COLOR": color_combined,      # ✅ garment | trim
@@ -673,6 +595,7 @@ FABRIC_SCHEMA = {
     "file_name": "NVARCHAR(255) NOT NULL",
     "STYLE_NO": "NVARCHAR(100) NULL",
     "POSITION": "NVARCHAR(200) NULL",
+    "POSITION": "NVARCHAR(200) NULL",
     "COLOR_RAW": "NVARCHAR(100) NULL",
     "COLOR_CODE": "NVARCHAR(20) NULL",
     "COLOR_NAME": "NVARCHAR(200) NULL",
@@ -748,6 +671,218 @@ def ensure_table_structure(engine: Engine, full_table_name: str, schema_def: dic
                 conn.execute(text(f"ALTER TABLE {schema}.{table} DROP COLUMN [{c}];"))
 
 
+
+
+# =========================================================
+# 8A) POST-PROCESS RULES (apply on final DataFrame before SQL)
+# =========================================================
+_AS_LABEL_RE = re.compile(r"\bAS\s*LABELS?\b", re.I)
+_SEP = " | "
+
+_FIX_DESC_KEYS = [
+    "CARE LABEL + UNIVERSAL CARE LABEL",
+    'WARNING LABELS + "KEEP AWAY FROM FIRE" WARNING LBL',
+    "HANGTAG LOOP + HTL-001 HANGTAG LOOP",
+    "SWIFT TACK LOOPS + SWIFT TACK LOOP",
+]
+
+def _norm_key(s: Any) -> str:
+    return re.sub(r"[^A-Z0-9]+", " ", str(s or "").upper()).strip()
+
+def _is_as_label(s: Any) -> bool:
+    return bool(_AS_LABEL_RE.search(str(s or "")))
+
+def _extract_position_from_description(desc: Any) -> str:
+    """Try to extract POSITION from normal 'internal + position + name' description."""
+    parts = [p.strip() for p in str(desc or "").split("+")]
+    if len(parts) >= 2:
+        return norm(parts[1])
+    return ""
+
+def _zipper_prefix_from_position(pos: Any) -> str:
+    """Return zipper grouping prefix based on POSITION.
+
+    New rule: remove the trailing keyword (ZIPPER TEETH/TAPE/PULL) and keep the
+    left part (prefix). Zipper rows are merged ONLY when this prefix matches.
+    Normalization: UPPER + collapse whitespace + strip.
+    """
+    s = norm(pos)
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s).strip().upper()
+    for kw in ("ZIPPER TEETH", "ZIPPER TAPE", "ZIPPER PULL"):
+        if kw in s:
+            return s.split(kw, 1)[0].strip()
+    return ""
+
+
+def post_process_trimlabels_before_sql(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
+    """Apply business rules on TrimAndLabels dataframe right before SQL insert."""
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # ensure file_name exists for grouping
+    df["file_name"] = file_name
+
+    # -----------------------------
+    # RULE NEW #1:
+    # If description contains one of FIX keys AND all COLOR_TRIM are AS LABEL -> keep 1 row only
+    # -----------------------------
+    if "COLOR_TRIM" in df.columns and "description" in df.columns:
+        desc_norm = df["description"].apply(_norm_key)
+        key_norms = [_norm_key(k) for k in _FIX_DESC_KEYS]
+
+        mask_fix = desc_norm.apply(lambda d: any(k in d for k in key_norms))
+        fix_df = df[mask_fix]
+
+        drop_idx: list[int] = []
+        for _, g in fix_df.groupby(["file_name", "STYLE_NO", "description"], dropna=False):
+            if g["COLOR_TRIM"].apply(_is_as_label).all() and len(g) > 1:
+                drop_idx.extend(g.index[1:].tolist())
+        if drop_idx:
+            df = df.drop(index=drop_idx)
+
+    # -----------------------------
+    # RULE NEW #2 (AND condition):
+    # Hangtag (description contains HANGTAG) AND Packing page
+    # If COLOR_TRIM is AS LABEL, within same POSITION (same column) -> keep 1 row, no merge
+    # Packing detection: matched_groups contains LABELS (Labels & packaging pages)
+    # -----------------------------
+    if {"COLOR_TRIM", "description", "matched_groups"}.issubset(df.columns):
+        is_hangtag = df["description"].str.contains("HANGTAG", case=False, na=False)
+        is_packing = df["matched_groups"].str.contains("LABELS", case=False, na=False)
+        is_as = df["COLOR_TRIM"].apply(_is_as_label)
+
+        mask_hp = is_hangtag & is_packing & is_as
+        hp_df = df[mask_hp].copy()
+        if not hp_df.empty:
+            hp_df["_pos"] = hp_df["POSITION"] if "POSITION" in hp_df.columns else hp_df["description"].apply(_extract_position_from_description)
+            drop_idx: list[int] = []
+            for _, g in hp_df.groupby(["file_name", "STYLE_NO", "_pos"], dropna=False):
+                if len(g) > 1:
+                    drop_idx.extend(g.index[1:].tolist())
+            if drop_idx:
+                df = df.drop(index=drop_idx)
+
+    # -----------------------------
+    # ZIPPER (UPDATED RULE):
+    # - Parse step outputs RAW rows only (no zipper merge at parse time).
+    # - Here (right before SQL) we merge zipper components across pages/tables.
+    # - Merge key is: (file_name, STYLE_NO, garment_color, POSITION_PREFIX)
+    #   where POSITION_PREFIX = text BEFORE 'ZIPPER TEETH/TAPE/PULL' in POSITION.
+    # - After prefix matches, we keep the OLD behavior inside that group:
+    #   require TEETH + TAPE + at least 1 PULL to create 1 merged row per garment color.
+    # -----------------------------
+    if {"matched_groups", "COLOR", "COLOR_TRIM", "ITEM_DESCRIPTION"}.issubset(df.columns):
+        trim_df = df[df["matched_groups"].str.contains("TRIM", case=False, na=False)].copy()
+        if not trim_df.empty:
+            # Prefer dedicated POSITION column (added in parse). Fallback to extracting from description for backward-compat.
+            if "POSITION" in trim_df.columns:
+                trim_df["_pos_u"] = trim_df["POSITION"].apply(lambda x: re.sub(r"\s+", " ", norm(x)).strip().upper())
+            else:
+                trim_df["_pos_u"] = trim_df["description"].apply(_extract_position_from_description).apply(
+                    lambda x: re.sub(r"\s+", " ", norm(x)).strip().upper()
+                )
+
+            trim_df["_zip_prefix"] = trim_df["_pos_u"].apply(_zipper_prefix_from_position)
+
+            # Any zipper components at all?
+            teeth_rows = trim_df[trim_df["_pos_u"].str.contains("ZIPPER TEETH", na=False)]
+            tape_rows  = trim_df[trim_df["_pos_u"].str.contains("ZIPPER TAPE", na=False)]
+            pull_rows  = trim_df[trim_df["_pos_u"].str.contains("ZIPPER PULL", na=False)]
+
+            if not teeth_rows.empty and not tape_rows.empty and not pull_rows.empty:
+                # group by STYLE_NO to avoid mixing different styles inside a file
+                for style_no, g_style in trim_df.groupby("STYLE_NO", dropna=False):
+                    g_style = g_style.copy()
+
+                    # group by POSITION PREFIX (new rule)
+                    for prefix, g_pref in g_style.groupby("_zip_prefix", dropna=False):
+                        prefix = norm(prefix).strip().upper()
+                        if not prefix:
+                            continue
+
+                        g_teeth = g_pref[g_pref["_pos_u"].str.contains("ZIPPER TEETH", na=False)]
+                        g_tape  = g_pref[g_pref["_pos_u"].str.contains("ZIPPER TAPE", na=False)]
+                        g_pull  = g_pref[g_pref["_pos_u"].str.contains("ZIPPER PULL", na=False)]
+
+                        if g_teeth.empty or g_tape.empty or g_pull.empty:
+                            continue
+                        
+                        # helper: parse garment/trim from COLOR "garment | trim"
+                        def _split_color(color_val: Any) -> tuple[str, str]:
+                            parts = [p.strip() for p in str(color_val or "").split(_SEP)]
+                            if len(parts) >= 2:
+                                return norm(parts[0]), norm(parts[1])
+                            return norm(parts[0]) if parts else "", ""
+
+                        # OLD behavior, but scoped by (STYLE_NO, prefix)
+                        tape_by_garment: dict[str, tuple[str, str]] = {}
+                        for _, r in g_tape.iterrows():
+                            garment, trim = _split_color(r.get("COLOR"))
+                            if garment and trim:
+                                tape_by_garment[garment] = (trim, r.get("description", ""))
+
+                        pulls_by_garment: dict[str, list[tuple[str, str]]] = {}
+                        for _, r in g_pull.iterrows():
+                            garment, trim = _split_color(r.get("COLOR"))
+                            if garment and trim:
+                                pulls_by_garment.setdefault(garment, []).append((trim, r.get("description", "")))
+
+                        teeth_by_garment: dict[str, tuple[str, str]] = {}
+                        for _, r in g_teeth.iterrows():
+                            garment, _trim = _split_color(r.get("COLOR"))
+                            if garment:
+                                teeth_by_garment[garment] = (r.get("ITEM_DESCRIPTION", ""), r.get("description", ""))
+
+                        new_rows: list[dict[str, Any]] = []
+                        merged_garments: set[str] = set()
+
+                        for garment, (item_desc, desc_teeth) in teeth_by_garment.items():
+                            if garment not in tape_by_garment or garment not in pulls_by_garment:
+                                continue
+
+                            tape_trim, desc_tape = tape_by_garment[garment]
+                            pull_trims = [t for t, _d in pulls_by_garment.get(garment, [])]
+                            pull_descs = [_d for _t, _d in pulls_by_garment.get(garment, [])]
+
+                            merged_desc = _SEP.join([d for d in [desc_teeth, desc_tape, *pull_descs] if norm(d)])
+                            merged_color = _SEP.join([x for x in [garment, tape_trim, *pull_trims] if norm(x)])
+
+                            new_rows.append({
+                                "SUPPLIER": "",
+                                "STYLE_NO": style_no,
+                                "POSITION": f"{prefix} ZIPPER",
+                                "description": merged_desc,
+                                "ITEM_DESCRIPTION": item_desc or "zipper teeth",
+                                "COLOR": merged_color,
+                                "COLOR_TRIM": tape_trim,
+                                "DEL": "",
+                                "DATE_APPROVED": "",
+                                "Status2": "",
+                                "page": None,  # merged across pages/tables
+                                "matched_groups": "TRIM",
+                                "top_right_text": "",
+                                "file_name": file_name,
+                            })
+                            merged_garments.add(garment)
+
+                        if new_rows and merged_garments:
+                            # Drop ONLY original component rows inside this STYLE_NO + PREFIX + GARMENT set
+                            g_zip = g_pref[g_pref["_pos_u"].str.contains(r"ZIPPER (TEETH|TAPE|PULL)", na=False, regex=True)].copy()
+                            if not g_zip.empty:
+                                g_zip["_garment"], g_zip["_trim"] = zip(*g_zip["COLOR"].apply(_split_color))
+                                idx_to_drop = g_zip[g_zip["_garment"].isin(merged_garments)].index.tolist()
+                                if idx_to_drop:
+                                    df = df.drop(index=idx_to_drop, errors="ignore")
+
+                            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+
+    return df
+
+
 def delete_then_append_by_file(
     engine: Engine,
     df: pd.DataFrame,
@@ -763,7 +898,14 @@ def delete_then_append_by_file(
     # 1) standardize column names
     df = standardize_columns(df)
 
-    # 2) ensure schema and table structure
+    
+    # 1.5) ensure file_name early (needed for post-rules grouping)
+    df[file_col] = file_name
+
+    # 1.6) POST-RULES: only for TrimAndLabels (keep PDF reading unchanged)
+    if not full_table_name.lower().endswith(".fabric"):
+        df = post_process_trimlabels_before_sql(df, file_name)
+# 2) ensure schema and table structure
     if full_table_name.lower().endswith(".fabric"):
         ensure_table_structure(engine, full_table_name, FABRIC_SCHEMA, strict_drop_extra=False)
     else:
@@ -790,7 +932,7 @@ def delete_then_append_by_file(
             if_exists="append",
             index=False,
             method="multi",
-            chunksize=2000,
+            chunksize=100,
         )
 
 
@@ -909,3 +1051,46 @@ if __name__ == "__main__":
             trimlabels_table="dbo.TrimAndLabels",
             file_col="file_name",
         )
+
+# if __name__ == "__main__":
+#     import argparse
+#     from pathlib import Path
+
+#     # =========================
+#     # DEBUG QUICK SWITCH
+#     # - Set to a full file path string to load only 1 PDF
+#     # - Set to None to use --input-dir like normal
+#     # =========================
+#     DEBUG_SINGLE_FILE = r"Z:\BU1\HADDAD\12. DESIGN CHART\H26\CC04\ACN-ZHCC04-H-2026_02_06_2026_02_03_18_PM\ACN-ZHCC04-H-2026_02_06_2026_02_03.pdf"   # <- sửa path ở đây
+#     # DEBUG_SINGLE_FILE = None                 # <- bật lại mode folder
+
+#     ap = argparse.ArgumentParser()
+#     ap.add_argument("--input-dir", required=(DEBUG_SINGLE_FILE is None),
+#                     help="Folder contains uploaded PDFs (from API)")
+#     ap.add_argument("--recursive", action="store_true")
+#     args = ap.parse_args()
+
+#     BASE_DIR = Path(__file__).resolve().parent
+#     CONFIG_PATH = BASE_DIR / "ServerPassword.json"
+
+#     server, database, user, password = read_config(CONFIG_PATH)
+#     engine = create_engine_sqlserver(server, database, user, password)
+
+#     # Build pdf_paths
+#     if DEBUG_SINGLE_FILE is not None:
+#         pdf_paths = [DEBUG_SINGLE_FILE]
+#     else:
+#         folder = Path(args.input_dir)
+#         pdf_paths = folder.rglob("*.pdf") if args.recursive else folder.glob("*.pdf")
+#         pdf_paths = sorted([str(p) for p in pdf_paths])
+
+#     print(f"Found {len(pdf_paths)} PDF(s) to load (REPLACE mode).")
+#     for pdf_path in pdf_paths:
+#         print("Loading (delete+append):", pdf_path)
+#         load_pdf_to_sql(
+#             engine,
+#             pdf_path,
+#             fabric_table="dbo.Fabric",
+#             trimlabels_table="dbo.TrimAndLabels",
+#             file_col="file_name",
+#         )
