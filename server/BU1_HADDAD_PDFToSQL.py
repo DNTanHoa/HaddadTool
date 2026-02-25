@@ -801,8 +801,7 @@ def post_process_trimlabels_before_sql(df: pd.DataFrame, file_name: str) -> pd.D
                     # group by POSITION PREFIX (new rule)
                     for prefix, g_pref in g_style.groupby("_zip_prefix", dropna=False):
                         prefix = norm(prefix).strip().upper()
-                        if not prefix:
-                            continue
+                        prefix = prefix or "GLOBAL"
 
                         g_teeth = g_pref[g_pref["_pos_u"].str.contains("ZIPPER TEETH", na=False)]
                         g_tape  = g_pref[g_pref["_pos_u"].str.contains("ZIPPER TAPE", na=False)]
