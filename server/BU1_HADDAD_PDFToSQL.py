@@ -445,12 +445,29 @@ def parse_one_table_to_trim_rows(df_table: pd.DataFrame, meta: dict) -> list[dic
 # 6) Parse FABRIC
 # =========================================================
 def parse_one_table_to_fabric_rows(df_table: pd.DataFrame, meta: dict) -> list[dict]:
+    """
+    NEW FABRIC RULE (2026-02)
+
+    Output per (GARMENT_COLOR row under COLORWAYS) x (POSITION column):
+      - VENDOR_CODE: blank
+      - STYLE_NO: meta["style_number"]
+      - GARMENT_COLOR_RAW: c0 (left column)
+      - COLOR: first 3 chars of GARMENT_COLOR_RAW
+      - FASHION_COLOR: GARMENT_COLOR_RAW without first 3 chars, strip leading " - " if any
+      - POSITION: header value for that column
+      - INTERNAL_CODE / DEV_CODE / FABRIC_NAME / CONTENT / WEIGHT: from label rows (c0 as label)
+      - MATERIAL_CODE: "FB-" + INTERNAL_CODE
+      - DESCRIPTION: "Dev code, Name, Content, Weight"
+      - COLOR_NAME: cell under current POSITION column (row under COLORWAYS)
+      - DEADLINE_APPROVE / EX_FACT: blank
+    """
     cols = [c for c in df_table.columns if re.fullmatch(r"c\d+", c)]
     if not cols:
         return []
 
+    # 1) Header row -> positions
     header = df_table.iloc[0].to_dict()
-    position_cols = []
+    position_cols: list[tuple[str, str]] = []
     for c in cols:
         if c == "c0":
             continue
@@ -460,26 +477,79 @@ def parse_one_table_to_fabric_rows(df_table: pd.DataFrame, meta: dict) -> list[d
     if not position_cols:
         return []
 
+    # 2) Map label rows (c0 is label)
+    label_to_row: dict[str, Any] = {}
+    for i in range(len(df_table)):
+        label = norm(df_table.iloc[i].get("c0", ""))
+        if label:
+            label_to_row[label.upper()] = df_table.iloc[i]
+
+    # helper: label variants (vendor PDFs hay viết khác nhau)
+    def _pick_first(labels: list[str], col: str) -> str:
+        return pick_first_value(label_to_row, labels, col)
+
+    # 3) Find COLORWAY(S) row
     color_idx, _span_cols = find_colorway_row_and_span(df_table, cols, max_window=6)
     if color_idx is None:
         return []
 
-    out = []
-    for col, position in position_cols:
-        for i in range(color_idx + 1, len(df_table)):
-            row_i = df_table.iloc[i]
-            cell = read_color_under_position(row_i, col, cols, join_width=2)
-            if not is_color_value(cell):
+    out: list[dict] = []
+
+    # 4) Iterate rows under COLORWAYS
+    for i in range(color_idx + 1, len(df_table)):
+        row_i = df_table.iloc[i]
+
+        garment_raw = norm(row_i.get("c0", ""))
+        if not is_color_value(garment_raw):
+            continue
+
+        garment_code = norm(garment_raw[:3])
+        fashion_color = norm(garment_raw[3:])
+        fashion_color = re.sub(r"^[\-\–\—\s]+", "", fashion_color).strip()  # strip leading " - "
+
+        for col, position in position_cols:
+            color_name = read_color_under_position(row_i, col, cols, join_width=2)
+            color_name = norm(color_name)
+            if not color_name:
                 continue
 
-            color_code, color_name = split_color(cell)
+            internal_code = _pick_first(["INTERNAL CODE", "INTERNAL_CODE", "INTERNAL"], col)
+            dev_code = pick_dev_or_vendor(label_to_row, col)
+
+            fabric_name = _pick_first(["NAME", "ITEM NAME", "FABRIC NAME", "DESCRIPTION"], col)
+            content = _pick_first(["CONTENT", "FABRIC CONTENT", "COMPOSITION"], col)
+            weight = _pick_first(["WEIGHT", "WT", "FABRIC WEIGHT"], col)
+
+            material_code = f"FB-{internal_code}" if internal_code else ""
+
+            # Description: Dev code, Name, Content, Weight (comma-separated)
+            desc_parts = [p for p in [dev_code, fabric_name, content, weight] if norm(p)]
+            description = ", ".join(desc_parts)
 
             out.append({
+                "VENDOR_CODE": "",
                 "STYLE_NO": meta.get("style_number", ""),
+
+                "GARMENT_COLOR_RAW": garment_raw,
+                "COLOR": garment_code,
+                "FASHION_COLOR": fashion_color,
+
                 "POSITION": position,
-                "COLOR_RAW": cell,
-                "COLOR_CODE": color_code,
+
+                "INTERNAL_CODE": internal_code,
+                "MATERIAL_CODE": material_code,
+
+                "DEV_CODE": dev_code,
+                "FABRIC_NAME": fabric_name,
+                "CONTENT": content,
+                "WEIGHT": weight,
+                "DESCRIPTION": description,
+
                 "COLOR_NAME": color_name,
+
+                "DEADLINE_APPROVE": "",
+                "EX_FACT": "",
+
                 "page": meta.get("page"),
                 "matched_groups": meta.get("matched_groups", ""),
                 "top_right_text": meta.get("top_right_text", ""),
@@ -592,13 +662,32 @@ def ensure_schema(engine: Engine, schema: str) -> None:
 
 
 FABRIC_SCHEMA = {
+    # ===== NEW FABRIC STRUCTURE (2026-02) =====
     "file_name": "NVARCHAR(255) NOT NULL",
+
+    # Business fields
+    "VENDOR_CODE": "NVARCHAR(50) NULL",                 # always blank for now
     "STYLE_NO": "NVARCHAR(100) NULL",
+    "GARMENT_COLOR_RAW": "NVARCHAR(200) NULL",          # left column (c0) garment color text
+    "COLOR": "NVARCHAR(20) NULL",                       # 3-char garment color code
+    "FASHION_COLOR": "NVARCHAR(200) NULL",              # garment color name (garment raw without first 3 chars, strip leading ' - ')
     "POSITION": "NVARCHAR(200) NULL",
-    "POSITION": "NVARCHAR(200) NULL",
-    "COLOR_RAW": "NVARCHAR(100) NULL",
-    "COLOR_CODE": "NVARCHAR(20) NULL",
-    "COLOR_NAME": "NVARCHAR(200) NULL",
+
+    "INTERNAL_CODE": "NVARCHAR(100) NULL",
+    "MATERIAL_CODE": "NVARCHAR(120) NULL",              # FB-<INTERNAL_CODE>
+
+    "DEV_CODE": "NVARCHAR(100) NULL",
+    "FABRIC_NAME": "NVARCHAR(300) NULL",
+    "CONTENT": "NVARCHAR(800) NULL",
+    "WEIGHT": "NVARCHAR(120) NULL",
+    "DESCRIPTION": "NVARCHAR(1200) NULL",               # "Dev code, Name, Content, Weight"
+
+    "COLOR_NAME": "NVARCHAR(300) NULL",                 # value under Position column
+
+    "DEADLINE_APPROVE": "NVARCHAR(50) NULL",            # blank
+    "EX_FACT": "NVARCHAR(50) NULL",                     # blank
+
+    # Meta
     "page": "INT NULL",
     "matched_groups": "NVARCHAR(200) NULL",
     "top_right_text": "NVARCHAR(500) NULL",
@@ -1060,7 +1149,7 @@ if __name__ == "__main__":
 #     # - Set to a full file path string to load only 1 PDF
 #     # - Set to None to use --input-dir like normal
 #     # =========================
-#     DEBUG_SINGLE_FILE = r"Z:\BU1\HADDAD\12. DESIGN CHART\H26\CC04\ACN-ZHCC04-H-2026_02_06_2026_02_03_18_PM\ACN-ZHCC04-H-2026_02_06_2026_02_03.pdf"   # <- sửa path ở đây
+#     DEBUG_SINGLE_FILE = r"C:\Users\ADMIN\Downloads\NKN-PHP724-H-2026_02_25_2026_03_31.pdf"
 #     # DEBUG_SINGLE_FILE = None                 # <- bật lại mode folder
 
 #     ap = argparse.ArgumentParser()
