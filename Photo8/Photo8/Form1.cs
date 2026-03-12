@@ -1,27 +1,28 @@
-﻿using OpenQA.Selenium;
+﻿using DevExpress.Data.NetCompatibility.Extensions;
+using DevExpress.XtraEditors.Filtering;
+using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
-using System;
-using System.Windows.Forms;
 using SeleniumExtras.WaitHelpers;
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Drawing;
-using System.Data.SqlClient;
-using System.Data;
-using System.Configuration;
-using System.IO;
 using System.ComponentModel;
-using DevExpress.Data.NetCompatibility.Extensions;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics.Contracts;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Security.Policy;
 using System.Text.RegularExpressions;
-using System.Diagnostics.Contracts;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement.ListView;
-using System.Threading.Tasks;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using System.Threading;
-using DevExpress.XtraEditors.Filtering;
-using System.Reflection.Emit;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.ListView;
 //using static DevExpress.Data.Filtering.Helpers.SubExprHelper.ThreadHoppingFiltering;
 
 namespace Photo8
@@ -89,16 +90,21 @@ namespace Photo8
         {
             try
             {
-                string profilePath = GetChromeProfilePath();
-
+                string profilePath = this.GetChromeProfilePath();
                 if (!Directory.Exists(profilePath))
+                {
                     Directory.CreateDirectory(profilePath);
-
+                }
+                string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                string chromeBinaryPath = Path.Combine(baseDirectory, "Chrome", "chrome.exe");
+                string text = Path.Combine(baseDirectory, "Driver", "chromedriver.exe");
                 ChromeOptions options = new ChromeOptions();
+                options.BinaryLocation = chromeBinaryPath;
+                options.AddArgument("--user-data-dir=" + profilePath);
                 options.AddArgument("--start-maximized");
-                options.AddArgument($"--user-data-dir={profilePath}");
-
-                driver = new ChromeDriver(options);
+                ChromeDriverService service = ChromeDriverService.CreateDefaultService(text);
+                service.HideCommandPromptWindow = true;
+                this.driver = new ChromeDriver(service, options);
 
                 // Điều hướng tới trang login
                 driver.Navigate().GoToUrl("https://photo8.haddad.com/");
@@ -121,6 +127,8 @@ namespace Photo8
 
         private void btnLoadTasks_Click(object sender, EventArgs e)
         {
+            var MissingPO = "";
+            dt = new DataTable();
             try
             {
                 // Kiểm tra đã login
@@ -143,7 +151,7 @@ namespace Photo8
                     .Where(x => !string.IsNullOrWhiteSpace(x))
                     .Distinct()
                     .ToList();
-                var POList  = rawInputPO
+                var POList = rawInputPO
                     .Split(new[] { ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                     .Select(x => x.Trim())
                     .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -162,132 +170,46 @@ namespace Photo8
 
                 if (POList.Count == 0)
                 {
-                    var parameters = LabelList
-                        .Select((Label, index) => $"@p{index}")
-                        .ToList();
-
-                    string sql = $@"
-                    SELECT
-                        PurchaseOrderNumber
-                        ,CASE WHEN Season = 'M' THEN 'Summer '
-                              WHEN Season = 'F' THEN 'Fall '
-                              WHEN Season = 'S' THEN 'Spring '
-                              WHEN Season = 'H' THEN 'Holiday '
-                            END + cast(Year as nvarchar(4)) Season
-                        ,ContractNo
-                        ,CustomerStyle
-                        ,FORMAT(ShipDate, 'MMM dd, yyyy', 'en-US') AS ShipDateText
-                        ,ColorCode
-                        ,LabelCode
-                        ,Account
-                        ,Contractor
-                        ,Length
-                        ,Width
-                        ,Height
-                        ,NetWeight
-                        ,GrossWeight
-                        ,QuantityPerCarton
-                    FROM ItemStyle i
-                    LEFT JOIN 
-                    (
-                        SELECT 
-	                        LSStyle,MAX(TRY_CAST(Length as float)) Length
-	                        ,MAX(TRY_CAST(Width as float)) Width
-	                        ,MAX(TRY_CAST(Height as float)) Height
-	                        ,MAX(TRY_CAST(NetWeight as float)) NetWeight
-	                        ,MAX(TRY_CAST(GrossWeight as float)) GrossWeight
-	                        ,MAX(TRY_CAST(QuantityPerCarton as float)) QuantityPerCarton
-                        FROM PackingLine
-                        WHERE IsDeleted = 0
-                        GROUP BY LSStyle
-                    )p ON p.LSStyle = i.LSStyle AND i.IsDeleted = 0 AND ISNULL(ItemStyleStatusCode,1) <> 3
-                    WHERE LabelCode IN ({string.Join(",", parameters)})
-                    AND ContractNo = '{ContractNo}'
-                    AND Contractor = '{Contractor}'
-                    AND (Season + right(cast(Year as nvarchar(4)),2) = '{Season}'
-                    OR Season + cast(Year as nvarchar(4)) = '{Season}')
-                    ";
-
-                    string connStr = ConfigurationManager
-                        .ConnectionStrings["MyDbConnectionPro"]
-                        .ConnectionString;
-                    using (SqlConnection conn = new SqlConnection(connStr))
-                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    string LabeString = string.Join(",", LabelList);
+                    using (SqlConnection conn = new SqlConnection(ConfigurationManager.ConnectionStrings["MyDbConnectionPro"].ConnectionString))
                     {
-                        for (int i = 0; i < LabelList.Count; i++)
+                        using (SqlCommand cmd = new SqlCommand("dbo.GetInfoForPhoto8", conn))
                         {
-                            cmd.Parameters.AddWithValue($"@p{i}", LabelList[i]);
-                        }
-
-                        conn.Open();
-
-                        using (SqlDataAdapter da = new SqlDataAdapter(cmd))
-                        {
-                            da.Fill(dt);
+                            cmd.CommandType = CommandType.StoredProcedure;
+                            cmd.Parameters.AddWithValue("@Type", 2);
+                            cmd.Parameters.AddWithValue("@POList", "");
+                            cmd.Parameters.AddWithValue("@LabelList", LabeString);
+                            cmd.Parameters.AddWithValue("@ContractNo", ContractNo);
+                            cmd.Parameters.AddWithValue("@Contractor", Contractor);
+                            cmd.Parameters.AddWithValue("@Season", Season);
+                            conn.Open();
+                            using (SqlDataAdapter da = new SqlDataAdapter(cmd))
+                            {
+                                da.Fill(this.dt);
+                            }
                         }
                     }
 
                 }
                 else
                 {
-                    var parameters = POList
-                        .Select((po, index) => $"@p{index}")
-                        .ToList();
-
-                    string sql = $@"
-                    SELECT
-                        PurchaseOrderNumber
-                        ,CASE WHEN Season = 'M' THEN 'Summer '
-                              WHEN Season = 'F' THEN 'Fall '
-                              WHEN Season = 'S' THEN 'Spring '
-                              WHEN Season = 'H' THEN 'Holiday '
-                            END + cast(Year as nvarchar(4)) Season
-                        ,ContractNo
-                        ,CustomerStyle
-                        ,FORMAT(ShipDate, 'MMM dd, yyyy', 'en-US') AS ShipDateText
-                        ,ColorCode
-                        ,LabelCode
-                        ,Account
-                        ,Contractor
-                        ,Length
-                        ,Width
-                        ,Height
-                        ,NetWeight
-                        ,GrossWeight
-                        ,QuantityPerCarton   
-                    FROM ItemStyle i
-                    LEFT JOIN 
-                    (
-                        SELECT 
-	                            LSStyle,MAX(TRY_CAST(Length as float)) Length
-	                            ,MAX(TRY_CAST(Width as float)) Width
-	                            ,MAX(TRY_CAST(Height as float)) Height
-	                            ,MAX(TRY_CAST(NetWeight as float)) NetWeight
-	                            ,MAX(TRY_CAST(GrossWeight as float)) GrossWeight
-                                ,MAX(TRY_CAST(QuantityPerCarton as float)) QuantityPerCarton
-                        FROM PackingLine
-                        WHERE IsDeleted = 0
-                        GROUP BY LSStyle
-                    )p ON p.LSStyle = i.LSStyle AND i.IsDeleted = 0 AND ISNULL(ItemStyleStatusCode,1) <> 3
-                    WHERE PurchaseOrderNumber IN ({string.Join(",", parameters)})
-                    ";
-
-                    string connStr = ConfigurationManager
-                        .ConnectionStrings["MyDbConnectionPro"]
-                        .ConnectionString;
-                    using (SqlConnection conn = new SqlConnection(connStr))
-                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    string poString = string.Join(",", POList);
+                    using (SqlConnection conn2 = new SqlConnection(ConfigurationManager.ConnectionStrings["MyDbConnectionPro"].ConnectionString))
                     {
-                        for (int i = 0; i < POList.Count; i++)
+                        using (SqlCommand cmd2 = new SqlCommand("dbo.GetInfoForPhoto8", conn2))
                         {
-                            cmd.Parameters.AddWithValue($"@p{i}", POList[i]);
-                        }
-
-                        conn.Open();
-
-                        using (SqlDataAdapter da = new SqlDataAdapter(cmd))
-                        {
-                            da.Fill(dt);
+                            cmd2.CommandType = CommandType.StoredProcedure;
+                            cmd2.Parameters.AddWithValue("@Type", 1);
+                            cmd2.Parameters.AddWithValue("@POList", poString);
+                            cmd2.Parameters.AddWithValue("@LabelList", "");
+                            cmd2.Parameters.AddWithValue("@ContractNo", "");
+                            cmd2.Parameters.AddWithValue("@Contractor", "");
+                            cmd2.Parameters.AddWithValue("@Season", "");
+                            conn2.Open();
+                            using (SqlDataAdapter da2 = new SqlDataAdapter(cmd2))
+                            {
+                                da2.Fill(this.dt);
+                            }
                         }
                     }
                 }
@@ -313,22 +235,31 @@ namespace Photo8
 
 
                 // === AUTOMATION TASK ===
-                FillCreateRequest(dt);
-
+                var Missing = FillCreateRequest(dt);
+                MissingPO = Missing;
                 CheckProcess = 2;
                 lblStatus.Text = "Status: Waiting...";
                 MessageBox.Show("Tasks Done!");
             }
             catch (Exception ex)
             {
-                CheckProcess = 0;
-                MessageBox.Show(ex.Message);
-                driver.Quit();
-                driver = null;
+                if (MissingPO != "")
+                {
+                    CheckProcess = 2;
+                    MessageBox.Show("Missing PO to fill: ", MissingPO);
+                }
+                else
+                {
+                    CheckProcess = 0;
+                    MessageBox.Show(ex.Message);
+                }
+
+                //driver.Quit();
+                //driver = null;
             }
         }
 
-        private void FillCreateRequest(DataTable dt)
+        private string FillCreateRequest(DataTable dt)
         {
             // Season
             WebDriverWait wait = new WebDriverWait(driver, TimeSpan.FromSeconds(100));
@@ -372,7 +303,7 @@ namespace Photo8
                  .FirstOrDefault();
             refInput.Click();
             refInput.Clear();
-                
+
 
             refInput.SendKeys(refText);
             refInput.SendKeys(OpenQA.Selenium.Keys.Enter);
@@ -506,7 +437,7 @@ namespace Photo8
             {
 
                 var shipDate1 = wait.Until(d =>
-                d.FindElement(By.XPath("//div[@class='field-label' and normalize-space()='Ship Dates']/following::input["+i+"]"))
+                d.FindElement(By.XPath("//div[@class='field-label' and normalize-space()='Ship Dates']/following::input[" + i + "]"))
                 );
                 shipDate1.Click();
                 shipDate1.SendKeys(ship);
@@ -547,6 +478,7 @@ namespace Photo8
                  .Distinct()
                  .ToList();
             wait.Until(d => d.FindElements(By.CssSelector(".checkbox-list input[type='checkbox']")).Count > 0);
+            var MissingPO = "";
 
             foreach (var po in poList)
             {
@@ -560,13 +492,14 @@ namespace Photo8
                             .ExecuteScript("arguments[0].click();", checkbox);
                     }
                 }
-                finally
+                catch (Exception ex)
                 {
-                    
+                    MissingPO = MissingPO + po + ", ";
                 }
             }
+            return MissingPO;
         }
-        
+
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             if (driver != null)
@@ -874,7 +807,7 @@ namespace Photo8
         private void UploadDraftImage(DataTable dt)
         {
             WebDriverWait wait = new WebDriverWait(driver, TimeSpan.FromSeconds(100));
-            
+
             if (CheckProcess == 1)
             {
                 MessageBox.Show("Need Load Draft before!");
@@ -1034,85 +967,6 @@ namespace Photo8
                     ((IJavaScriptExecutor)driver)
                         .ExecuteScript("arguments[0].scrollIntoView({block:'center'});", saveDraftBtn);
                     Thread.Sleep(2000);
-                    // Fill ClosedCarton data
-                    if (tag == "ClosedCarton")
-                    {
-                        List<CartonData> cartons = new List<CartonData>();
-
-                        foreach (DataRow row in dt.Rows)
-                        {
-                            if (row["PurchaseOrderNumber"] == DBNull.Value)
-                                continue;
-
-                            var carton = new CartonData
-                            {
-                                PO = row["PurchaseOrderNumber"].ToString().Trim(),
-                                Length = row["Length"]?.ToString(),
-                                Width = row["Width"]?.ToString(),
-                                Height = row["Height"]?.ToString(),
-                                NetWeight = row["NetWeight"]?.ToString(),
-                                GrossWeight = row["GrossWeight"]?.ToString()
-                            };
-
-                            cartons.Add(carton);
-                        }
-                        foreach (var data in cartons)
-                        {
-                            var carton = TryWaitCarton(driver, data.PO);
-                            if (carton == null)
-                            {
-                                Console.WriteLine($"⚠️ PO {data.PO} not found → skipped");
-                                return;
-                            }
-
-                            void Fill(string label, string value)
-                            {
-                                if (string.IsNullOrWhiteSpace(value)) return;
-
-                                try
-                                {
-                                    var input = carton.FindElement(By.XPath(
-                                        $".//div[@class='field'][.//div[text()='{label}']]//input"
-                                    ));
-
-                                    ((IJavaScriptExecutor)driver)
-                                        .ExecuteScript("arguments[0].value = '';", input);
-
-                                    input.SendKeys(value);
-                                }
-                                catch (NoSuchElementException)
-                                {
-                                    Console.WriteLine($"❌ Field '{label}' not found for PO {data.PO}");
-                                }
-                            }
-
-                            Fill("Length", data.Length);
-                            Fill("Width", data.Width);
-                            Fill("Height", data.Height);
-                            Fill("Net Weight", data.NetWeight);
-                            Fill("Gross Weight", data.GrossWeight);
-                        }
-                        int maxQty = dt.AsEnumerable()
-                            .Where(r => r["QuantityPerCarton"] != DBNull.Value)
-                            .Max(r => Convert.ToInt32(r["QuantityPerCarton"]));
-                        try
-                        {
-                            var qtyInput = wait.Until(d =>
-                                d.FindElement(By.XPath("//div[contains(@class,'qtyPerCarton')]//input"))
-                            );
-
-                            ((IJavaScriptExecutor)driver)
-                                .ExecuteScript("arguments[0].value = '';", qtyInput);
-
-                            qtyInput.SendKeys(maxQty.ToString());
-                        }
-                        catch (NoSuchElementException)
-                        {
-                            Console.WriteLine($"❌ Field 'QuantityPerCarton' not found ");
-                        }
-                        
-                    }    
-                        
                     saveDraftBtn.Click();
                 }
                 lblStatus.Text = $"Status: Done upload!";
@@ -1165,132 +1019,45 @@ namespace Photo8
 
                 if (POList.Count == 0)
                 {
-                    var parameters = LabelList
-                        .Select((Label, index) => $"@p{index}")
-                        .ToList();
-
-                    string sql = $@"
-                    SELECT
-                        PurchaseOrderNumber
-                        ,CASE WHEN Season = 'M' THEN 'Summer '
-                              WHEN Season = 'F' THEN 'Fall '
-                              WHEN Season = 'S' THEN 'Spring '
-                              WHEN Season = 'H' THEN 'Holiday '
-                            END + cast(Year as nvarchar(4)) Season
-                        ,ContractNo
-                        ,CustomerStyle
-                        ,FORMAT(ShipDate, 'MMM dd, yyyy', 'en-US') AS ShipDateText
-                        ,ColorCode
-                        ,LabelCode
-                        ,Account
-                        ,Contractor
-                        ,Length
-                        ,Width
-                        ,Height
-                        ,NetWeight
-                        ,GrossWeight
-                        ,QuantityPerCarton
-                    FROM ItemStyle i
-                    LEFT JOIN 
-                    (
-                        SELECT 
-	                        LSStyle,MAX(TRY_CAST(Length as float)) Length
-	                        ,MAX(TRY_CAST(Width as float)) Width
-	                        ,MAX(TRY_CAST(Height as float)) Height
-	                        ,MAX(TRY_CAST(NetWeight as float)) NetWeight
-	                        ,MAX(TRY_CAST(GrossWeight as float)) GrossWeight
-                            ,MAX(TRY_CAST(QuantityPerCarton as float)) QuantityPerCarton
-                        FROM PackingLine
-                        WHERE IsDeleted = 0
-                        GROUP BY LSStyle
-                    )p ON p.LSStyle = i.LSStyle AND i.IsDeleted = 0 AND ISNULL(ItemStyleStatusCode,1) <> 3
-                    WHERE LabelCode IN ({string.Join(",", parameters)})
-                    AND ContractNo = '{ContractNo}'
-                    AND Contractor = '{Contractor}'
-                    AND (Season + right(cast(Year as nvarchar(4)),2) = '{Season}'
-                    OR Season + cast(Year as nvarchar(4)) = '{Season}')
-                    ";
-
-                    string connStr = ConfigurationManager
-                        .ConnectionStrings["MyDbConnectionPro"]
-                        .ConnectionString;
-                    using (SqlConnection conn = new SqlConnection(connStr))
-                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    string LabeString = string.Join(",", LabelList);
+                    using (SqlConnection conn = new SqlConnection(ConfigurationManager.ConnectionStrings["MyDbConnectionPro"].ConnectionString))
                     {
-                        for (int i = 0; i < LabelList.Count; i++)
+                        using (SqlCommand cmd = new SqlCommand("dbo.GetInfoForPhoto8", conn))
                         {
-                            cmd.Parameters.AddWithValue($"@p{i}", LabelList[i]);
-                        }
-
-                        conn.Open();
-
-                        using (SqlDataAdapter da = new SqlDataAdapter(cmd))
-                        {
-                            da.Fill(dt);
+                            cmd.CommandType = CommandType.StoredProcedure;
+                            cmd.Parameters.AddWithValue("@Type", 2);
+                            cmd.Parameters.AddWithValue("@POList", "");
+                            cmd.Parameters.AddWithValue("@LabelList", LabeString);
+                            cmd.Parameters.AddWithValue("@ContractNo", ContractNo);
+                            cmd.Parameters.AddWithValue("@Contractor", Contractor);
+                            cmd.Parameters.AddWithValue("@Season", Season);
+                            conn.Open();
+                            using (SqlDataAdapter da = new SqlDataAdapter(cmd))
+                            {
+                                da.Fill(this.dt);
+                            }
                         }
                     }
-
                 }
                 else
                 {
-                    var parameters = POList
-                        .Select((po, index) => $"@p{index}")
-                        .ToList();
-
-                    string sql = $@"
-                    SELECT
-                        PurchaseOrderNumber
-                        ,CASE WHEN Season = 'M' THEN 'Summer '
-                              WHEN Season = 'F' THEN 'Fall '
-                              WHEN Season = 'S' THEN 'Spring '
-                              WHEN Season = 'H' THEN 'Holiday '
-                            END + cast(Year as nvarchar(4)) Season
-                        ,ContractNo
-                        ,CustomerStyle
-                        ,FORMAT(ShipDate, 'MMM dd, yyyy', 'en-US') AS ShipDateText
-                        ,ColorCode
-                        ,LabelCode
-                        ,Account
-                        ,Contractor
-                        ,Length
-                        ,Width
-                        ,Height
-                        ,NetWeight
-                        ,GrossWeight
-                        ,QuantityPerCarton
-                    FROM ItemStyle i
-                    LEFT JOIN 
-                    (
-                        SELECT 
-	                            LSStyle,MAX(TRY_CAST(Length as float)) Length
-	                            ,MAX(TRY_CAST(Width as float)) Width
-	                            ,MAX(TRY_CAST(Height as float)) Height
-	                            ,MAX(TRY_CAST(NetWeight as float)) NetWeight
-	                            ,MAX(TRY_CAST(GrossWeight as float)) GrossWeight
-                                ,MAX(TRY_CAST(QuantityPerCarton as float)) QuantityPerCarton
-                        FROM PackingLine
-                        WHERE IsDeleted = 0
-                        GROUP BY LSStyle
-                    )p ON p.LSStyle = i.LSStyle AND i.IsDeleted = 0 AND ISNULL(ItemStyleStatusCode,1) <> 3
-                    WHERE PurchaseOrderNumber IN ({string.Join(",", parameters)})
-                    ";
-
-                    string connStr = ConfigurationManager
-                        .ConnectionStrings["MyDbConnectionPro"]
-                        .ConnectionString;
-                    using (SqlConnection conn = new SqlConnection(connStr))
-                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    string poString = string.Join(",", POList);
+                    using (SqlConnection conn2 = new SqlConnection(ConfigurationManager.ConnectionStrings["MyDbConnectionPro"].ConnectionString))
                     {
-                        for (int i = 0; i < POList.Count; i++)
+                        using (SqlCommand cmd2 = new SqlCommand("dbo.GetInfoForPhoto8", conn2))
                         {
-                            cmd.Parameters.AddWithValue($"@p{i}", POList[i]);
-                        }
-
-                        conn.Open();
-
-                        using (SqlDataAdapter da = new SqlDataAdapter(cmd))
-                        {
-                            da.Fill(dt);
+                            cmd2.CommandType = CommandType.StoredProcedure;
+                            cmd2.Parameters.AddWithValue("@Type", 1);
+                            cmd2.Parameters.AddWithValue("@POList", poString);
+                            cmd2.Parameters.AddWithValue("@LabelList", "");
+                            cmd2.Parameters.AddWithValue("@ContractNo", "");
+                            cmd2.Parameters.AddWithValue("@Contractor", "");
+                            cmd2.Parameters.AddWithValue("@Season", "");
+                            conn2.Open();
+                            using (SqlDataAdapter da2 = new SqlDataAdapter(cmd2))
+                            {
+                                da2.Fill(this.dt);
+                            }
                         }
                     }
                 }
@@ -1332,18 +1099,103 @@ namespace Photo8
                 driver = null;
             }
         }
-        private void LongProcess()
-        {
-            Thread.Sleep(5000); // giả lập xử lý lâu
-        }
 
-        private async void button4_Click_1(object sender, EventArgs e)
+        private void FillPKL_Click(object sender, EventArgs e)
         {
-            await Task.Run(() =>
+            WebDriverWait wait = new WebDriverWait(this.driver, TimeSpan.FromSeconds(100.0));
+            if (this.CheckProcess == 1)
             {
-                LongProcess(); // chạy ngầm
-            });
+                MessageBox.Show("Need Load Draft before!");
+                return;
+            }
+            if (this.CheckProcess == 2)
+            {
+                string currentUrl = this.driver.Url;
+                while (!currentUrl.Contains("Details"))
+                {
+                    currentUrl = this.driver.Url;
+                }
+                string tagUrl = Regex.Match(currentUrl, "^.+?/Details").Value + "/ClosedCarton";
+                this.driver.Navigate().GoToUrl(tagUrl);
+                Thread.Sleep(4000);
+                List<CartonData> cartons = new List<CartonData>();
+                foreach (DataRow row in dt.Rows)
+                {
+                    if (row["PurchaseOrderNumber"] == DBNull.Value)
+                        continue;
 
+                    var carton = new CartonData
+                    {
+                        PO = row["PurchaseOrderNumber"].ToString().Trim(),
+                        Length = row["Length"]?.ToString(),
+                        Width = row["Width"]?.ToString(),
+                        Height = row["Height"]?.ToString(),
+                        NetWeight = row["NetWeight"]?.ToString(),
+                        GrossWeight = row["GrossWeight"]?.ToString()
+                    };
+                    cartons.Add(carton);
+                }
+                foreach (var data in cartons)
+                {
+                    var carton = TryWaitCarton(driver, data.PO);
+                    if (carton == null)
+                    {
+                        Console.WriteLine($"⚠️ PO {data.PO} not found → skipped");
+                        return;
+                    }
+
+                    void Fill(string label, string value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value)) return;
+
+                        try
+                        {
+                            var input = carton.FindElement(By.XPath(
+                                $".//div[@class='field'][.//div[text()='{label}']]//input"
+                            ));
+
+                            ((IJavaScriptExecutor)driver)
+                                .ExecuteScript("arguments[0].value = '';", input);
+
+                            input.SendKeys(value);
+                        }
+                        catch (NoSuchElementException)
+                        {
+                            Console.WriteLine($"❌ Field '{label}' not found for PO {data.PO}");
+                        }
+                    }
+
+                    Fill("Length", data.Length);
+                    Fill("Width", data.Width);
+                    Fill("Height", data.Height);
+                    Fill("Net Weight", data.NetWeight);
+                    Fill("Gross Weight", data.GrossWeight);
+                }
+                int maxQty = dt.AsEnumerable()
+                    .Where(r => r["QuantityPerCarton"] != DBNull.Value)
+                    .Max(r => Convert.ToInt32(r["QuantityPerCarton"]));
+                try
+                {
+                    var qtyInput = wait.Until(d =>
+                        d.FindElement(By.XPath("//div[contains(@class,'qtyPerCarton')]//input"))
+                    );
+
+                    ((IJavaScriptExecutor)driver)
+                        .ExecuteScript("arguments[0].value = '';", qtyInput);
+
+                    qtyInput.SendKeys(maxQty.ToString());
+                }
+                catch (NoSuchElementException)
+                {
+                    Console.WriteLine($"❌ Field 'QuantityPerCarton' not found ");
+                }
+                var saveDraftBtn = wait.Until(
+                    ExpectedConditions.ElementToBeClickable(
+                        By.XPath("//button[normalize-space()='Save Draft']")
+                    )
+                );
+                saveDraftBtn.Click();
+            }
         }
     }
 }
